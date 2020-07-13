@@ -1,0 +1,86 @@
+#!usr/bin/bash
+
+
+## I MAKE A COVARIATE FILE FROM ADNIMERGE PACKAGE IN R AND TOOK 7 COLUMNS Family ID (same with samples ID), IID, PHENO(condition CTL,AD,MCI) AGE, GENDER, ETHNOCITY AND AGE2 (age^2)
+## IMPUT COLUMNS WITH PC FROM FAM FILE AS WELL
+## THEN I DID UPLOAD IT INTO SERVER
+
+#change covariates columns from words to number -- otherwise cannot run in plink
+#FEMALE = 1
+#MALE = 2
+
+sed -i 's/Female/1/g' covariates.txt
+sed -i 's/Male/2/g' covariates.txt
+
+#split covatiates into parts-comparisons
+#this step occurs due to have splited covariates in cases of CTL-AD, CTL-MCI and MCI-AD
+awk '$3!="MCI"' covariates.txt > covariates_CTL_AD.txt
+awk '$3!="CN"' covariates.txt > covariates_MCI_AD.txt
+awk '$3!="Dementia"' covariates.txt > covariates_CTL_MCI.txt
+
+#I TRANSFORMED THE PHENO COLUMN TO IMPUTE THE AS AFFECTED-UNNAFFECTED INTO PED FILES (SEE BELOW)
+sed -i 's/Dementia/2/g' covariates_CTL_AD.txt
+sed -i 's/Dementia/2/g' covariates_MCI_AD.txt
+
+sed -i 's/CN/1/g' covariates_CTL_AD.txt
+sed -i 's/CN/1/g' covariates_CTL_MCI.txt
+
+sed -i 's/MCI/1/g' covariates_MCI_AD.txt
+sed -i 's/MCI/2/g' covariates_CTL_MCI.txt
+
+#make a phenotype file to impute phenotypes in plink file ped
+
+awk '{print ($1,$2,$3)}' covariates_CTL_AD.txt > phenotype_CTL_AD.txt
+awk '{print ($1,$2,$3)}' covariates_CTL_MCI.txt > phenotype_CTL_MCI.txt
+awk '{print ($1,$2,$3)}' covariates_MCI_AD.txt > phenotype_MCI_AD.txt
+
+#make file for --keep command plink -- tail -n +2 is to remove the header to have only the list of samples
+
+awk '{print $1,$2}' phenotype_CTL_AD.txt | tail -n +2 > phenotype_CTL_AD_ext.txt
+awk '{print $1,$2}' phenotype_MCI_AD.txt | tail -n +2 > phenotype_MCI_AD_ext.txt
+awk '{print $1,$2}' phenotype_CTL_MCI.txt | tail -n +2 > phenotype_CTL_MCI_ext.txt
+
+echo "Covariates Process Done!"
+
+mkdir association_scores
+mkdir temp
+
+# I MADE A LOOP TO TAKE EACH FILE WITH CHROMOSOMES TO PREVENT OVERPROCESSING IN SERVER
+
+for ((i=1 ; i<=23; i++))
+do
+
+#UNTAR FILES
+tar -xf ADNI.808_indiv.minGQ_21.pass.ADNI_ID.chr${i}.vcf.tar
+
+#FILTERING
+vcftools --gzvcf ADNI.808_indiv.minGQ_21.pass.ADNI_ID.chr${i}.vcf.gz --min-alleles 2 --max-alleles 2 --hwe 1e-6 --max-missing 0.05 --maf 0.01 --minQ 2 --remove-filtered-all --recode --out temp/filtered_chr${i}
+
+#CLEAN DIRECTORY FROM UNUSABLE FILES
+rm ADNI.808_indiv.minGQ_21.pass.ADNI_ID.chr${i}.vcf.g*
+
+# CREATE MAP PED FILES WITH PLINK
+plink --vcf temp/filtered_chr${i}.recode.vcf --double-id --recode --out temp/filtered_chr${i}
+
+sed -i 's/s/S/g' temp/filtered_chr${i}.ped
+
+#IMPUTE PHENO (AFFECTED, UNAFFECTED) IN 6TH COLUMN OF PED FILE DEPENDS ON CONDITION WE COMPARE
+plink --file temp/filtered_chr${i} --pheno phenotype_CTL_AD.txt --recode --out temp/filtered_CTL_AD_chr${i}
+plink --file temp/filtered_chr${i} --pheno phenotype_MCI_AD.txt --recode --out temp/filtered_MCI_AD_chr${i}
+plink --file temp/filtered_chr${i} --pheno phenotype_CTL_MCI.txt --recode --out temp/filtered_CTL_MCI_chr${i}
+
+#KEEP THOSE SAMPLES THAT PARTICIPATE IN ANALYSIS (ONLY CTL and AD IN CTL-AD etc)
+plink --file temp/filtered_CTL_AD_chr${i} --allow-no-sex --keep phenotype_CTL_AD_ext.txt --recode --out temp/filtered_CTL_AD_chr${i}
+plink --file temp/filtered_MCI_AD_chr${i} --allow-no-sex --keep phenotype_MCI_AD_ext.txt --recode --out temp/filtered_MCI_AD_chr${i}
+plink --file temp/filtered_CTL_MCI_chr${i} --allow-no-sex --keep phenotype_CTL_MCI_ext.txt --recode --out temp/filtered_CTL_MCI_chr${i}
+
+#RUN ASSOCIATION ANALYSIS WITH CAVARIATES -- --logistic because our analysis looking for disease
+plink --file temp/filtered_CTL_AD_chr${i} --allow-no-sex --snps-only --covar covariates_CTL_AD.txt --covar-name AGE AGE2 GENDER PC1 PC2 PC3 --logistic --out association_scores/chr${i}_CTL_AD_results_snps
+plink --file temp/filtered_MCI_AD_chr${i} --allow-no-sex --snps-only --covar covariates_MCI_AD.txt --covar-name AGE AGE2 GENDER PC1 PC2 PC3 --logistic --out association_scores/chr${i}_MCI_AD_results_snps
+plink --file temp/filtered_CTL_MCI_chr${i} --allow-no-sex --snps-only --covar covariates_CTL_MCI.txt --covar-name AGE AGE2 GENDER PC1 PC2 PC3 --logistic --out association_scores/chr${i}_CTL_MCI_results_snps
+
+plink --file temp/filtered_CTL_AD_chr${i} --allow-no-sex --covar covariates_CTL_AD.txt --covar-name AGE AGE2 GENDER PC1 PC2 PC3 --logistic --out association_scores/chr${i}_CTL_AD_results_indels
+plink --file temp/filtered_MCI_AD_chr${i} --allow-no-sex --covar covariates_MCI_AD.txt --covar-name AGE AGE2 GENDER PC1 PC2 PC3 --logistic --out association_scores/chr${i}_MCI_AD_results_indels
+plink --file temp/filtered_CTL_MCI_chr${i} --allow-no-sex --covar covariates_CTL_MCI.txt --covar-name AGE AGE2 GENDER PC1 PC2 PC3 --logistic --out association_scores/chr${i}_CTL_MCI_results_indels
+
+done
